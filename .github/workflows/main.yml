@@ -6,7 +6,7 @@ on:
       instance_count:
         description: 'Number of RDP instances to create'
         required: true
-        default: '10'
+        default: '5'
 
 jobs:
   secure-rdp:
@@ -14,9 +14,9 @@ jobs:
     timeout-minutes: 3600
     strategy:
       matrix:
-        instance: [1, 2, 3, 4, 5,6, 7, 8, 9, 10]
+        instance: [1, 2, 3, 4, 5]
       fail-fast: false
-      max-parallel: 10
+      max-parallel: 5
 
     steps:
       - name: Configure Core RDP Settings
@@ -55,6 +55,153 @@ jobs:
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
           
           Write-Host "User '$username' created successfully"
+
+      - name: Download Comet Browser
+        run: |
+          # Create Downloads directory if it doesn't exist
+          $downloadPath = "C:\Downloads"
+          if (-not (Test-Path $downloadPath)) {
+              New-Item -ItemType Directory -Path $downloadPath -Force | Out-Null
+              Write-Host "Created Downloads directory"
+          }
+          
+          # Download Comet Browser installer
+          $cometUrl = "https://github.com/muntahajamil001/per/releases/download/V2/comet_installer_latest.exe"
+          $installerPath = "$downloadPath\comet_installer_latest.exe"
+          
+          Write-Host "Downloading Comet Browser from GitHub..."
+          Write-Host "URL: $cometUrl"
+          Write-Host "Saving to: $installerPath"
+          
+          try {
+              Invoke-WebRequest -Uri $cometUrl -OutFile $installerPath -ErrorAction Stop
+              Write-Host "✓ Download completed successfully"
+              
+              # Verify file exists and show size
+              if (Test-Path $installerPath) {
+                  $fileSize = (Get-Item $installerPath).Length / 1MB
+                  Write-Host "✓ File verified: $([math]::Round($fileSize, 2)) MB"
+              }
+          } catch {
+              Write-Error "Failed to download Comet Browser: $_"
+              exit 1
+          }
+
+      - name: Install Comet Browser
+        run: |
+          $installerPath = "C:\Downloads\comet_installer_latest.exe"
+          
+          if (-not (Test-Path $installerPath)) {
+              Write-Error "Installer not found at $installerPath"
+              exit 1
+          }
+          
+          Write-Host "Installing Comet Browser..."
+          Write-Host "Installer path: $installerPath"
+          
+          # Create master_preferences file to skip setup screens
+          $installDir = "${env:ProgramFiles(x86)}\Comet\Application"
+          $prefsContent = @"
+          {
+            "browser": {
+              "check_default_browser": false,
+              "show_home_button": true
+            },
+            "distribution": {
+              "skip_first_run_ui": true,
+              "show_welcome_page": false,
+              "import_bookmarks": false,
+              "import_history": false,
+              "suppress_first_run_bubble": true,
+              "do_not_create_desktop_shortcut": false,
+              "do_not_create_quick_launch_shortcut": false,
+              "do_not_create_taskbar_shortcut": false,
+              "do_not_launch_chrome": true,
+              "do_not_register_for_update_launch": false,
+              "make_chrome_default": false,
+              "make_chrome_default_for_user": false,
+              "system_level": true,
+              "verbose_logging": true
+            },
+            "first_run_tabs": []
+          }
+          "@
+          
+          # Try silent installation with various flags
+          Write-Host "Starting silent installation..."
+          try {
+              Start-Process -FilePath $installerPath -ArgumentList "/S", "/silent", "--no-first-run", "--do-not-launch-chrome", "--system-level" -Wait -NoNewWindow
+              Write-Host "✓ Installation process completed"
+          } catch {
+              Write-Warning "Installation with silent flags had issues, trying basic install..."
+              Start-Process -FilePath $installerPath -ArgumentList "/S" -Wait -NoNewWindow
+          }
+          
+          # Wait for installation to complete
+          Start-Sleep -Seconds 15
+          
+          # Create master_preferences if install directory exists
+          if (Test-Path $installDir) {
+              $prefsContent | Out-File -FilePath "$installDir\master_preferences" -Encoding UTF8 -Force
+              Write-Host "✓ Created master_preferences file to skip setup"
+          }
+          
+          Write-Host "✓ Comet Browser installation completed"
+          Write-Host "Note: Installer kept at C:\Downloads\comet_installer_latest.exe for easy access"
+
+      - name: Create Desktop Shortcuts
+        run: |
+          # Create shortcut for all users
+          $publicDesktop = [Environment]::GetFolderPath("CommonDesktopDirectory")
+          $rdpUserDesktop = "C:\Users\RDP\Desktop"
+          
+          # Find Comet Browser executable
+          $possiblePaths = @(
+              "${env:ProgramFiles}\Comet\Application\comet.exe",
+              "${env:ProgramFiles(x86)}\Comet\Application\comet.exe",
+              "${env:LocalAppData}\Comet\Application\comet.exe",
+              "${env:ProgramFiles}\Comet Browser\comet.exe"
+          )
+          
+          $cometExe = $null
+          foreach ($path in $possiblePaths) {
+              if (Test-Path $path) {
+                  $cometExe = $path
+                  Write-Host "Found Comet Browser at: $path"
+                  break
+              }
+          }
+          
+          if (-not $cometExe) {
+              Write-Warning "Comet Browser executable not found in standard locations"
+              # List all installed programs for debugging
+              Get-ChildItem "C:\Program Files" -Directory | Select-Object Name | Write-Host
+              Get-ChildItem "C:\Program Files (x86)" -Directory | Select-Object Name | Write-Host
+          } else {
+              # Create shortcut function
+              $WshShell = New-Object -ComObject WScript.Shell
+              
+              # Create shortcut on Public Desktop
+              $shortcutPath = "$publicDesktop\Comet Browser.lnk"
+              $shortcut = $WshShell.CreateShortcut($shortcutPath)
+              $shortcut.TargetPath = $cometExe
+              $shortcut.WorkingDirectory = Split-Path $cometExe
+              $shortcut.Description = "Comet Browser"
+              $shortcut.Save()
+              Write-Host "Created shortcut on Public Desktop: $shortcutPath"
+              
+              # Create shortcut on RDP user desktop
+              if (-not (Test-Path $rdpUserDesktop)) {
+                  New-Item -ItemType Directory -Path $rdpUserDesktop -Force | Out-Null
+              }
+              $rdpShortcutPath = "$rdpUserDesktop\Comet Browser.lnk"
+              $rdpShortcut = $WshShell.CreateShortcut($rdpShortcutPath)
+              $rdpShortcut.TargetPath = $cometExe
+              $rdpShortcut.WorkingDirectory = Split-Path $cometExe
+              $rdpShortcut.Description = "Comet Browser"
+              $rdpShortcut.Save()
+              Write-Host "Created shortcut on RDP user Desktop: $rdpShortcutPath"
+          }
 
       - name: Install Tailscale
         run: |
@@ -118,6 +265,7 @@ jobs:
           Write-Host "  IP Address : $env:TAILSCALE_IP"
           Write-Host "  Username : RDP"
           Write-Host "  Password : Khizar@123"
+          Write-Host "  Comet Browser : Installed on Desktop"
           Write-Host "═══════════════════════════════════════════════"
           Write-Host ""
           
@@ -128,4 +276,3 @@ jobs:
               Write-Host "[$timestamp] Instance ${{ matrix.instance }} Active (Heartbeat #$counter)"
               Start-Sleep -Seconds 300
           }
-
